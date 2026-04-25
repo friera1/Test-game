@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Bot, InlineKeyboard } from 'grammy';
 
 const token = process.env.BOT_TOKEN;
-const appUrl = process.env.APP_URL || 'https://your-miniapp-domain.com';
+const siteUrl = process.env.SITE_URL || 'https://your-site-domain.com';
 
 if (!token) {
   throw new Error('BOT_TOKEN is required');
@@ -10,25 +10,43 @@ if (!token) {
 
 const bot = new Bot(token);
 
+function siteKeyboard() {
+  return new InlineKeyboard().url('Open FitMind site', siteUrl);
+}
+
 bot.command('start', async (ctx) => {
-  const keyboard = new InlineKeyboard().webApp('Open FitMind AI', appUrl);
   await ctx.reply(
-    'Welcome to FitMind AI. Track food, get workouts, meditate, and climb the leaderboard.',
-    { reply_markup: keyboard }
+    'Welcome to FitMind AI. Open the website to track food, get workouts, meditate, and see the leaderboard.',
+    { reply_markup: siteKeyboard() }
   );
 });
 
-bot.command('app', async (ctx) => {
-  const keyboard = new InlineKeyboard().webApp('Launch Mini App', appUrl);
-  await ctx.reply('Open the app:', { reply_markup: keyboard });
+bot.command('site', async (ctx) => {
+  await ctx.reply('Open the website:', { reply_markup: siteKeyboard() });
 });
 
-bot.command('profile', async (ctx) => {
-  await ctx.reply('Profile module is connected to the Mini App dashboard.');
+bot.command('login', async (ctx) => {
+  await ctx.reply('Use Telegram Login on the website to sign in securely.', {
+    reply_markup: siteKeyboard()
+  });
+});
+
+bot.command('workout', async (ctx) => {
+  await ctx.reply('Today: full-body session, 20 minutes. Open the website for the full plan.', {
+    reply_markup: siteKeyboard()
+  });
+});
+
+bot.command('food', async (ctx) => {
+  await ctx.reply('Upload a meal photo on the website to estimate calories.', {
+    reply_markup: siteKeyboard()
+  });
 });
 
 bot.command('rating', async (ctx) => {
-  await ctx.reply('Leaderboard preview: You are currently #3 with 360 points.');
+  await ctx.reply('Leaderboard preview: you are currently #3 with 360 points.', {
+    reply_markup: siteKeyboard()
+  });
 });
 
 bot.catch((err) => {
