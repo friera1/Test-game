@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import { prisma } from './lib/prisma.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -9,38 +10,100 @@ const SITE_URL = process.env.SITE_URL || 'http://localhost:5173';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 
 app.use(cors({ origin: SITE_URL, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/auth/telegram', (req, res) => {
+app.post('/api/auth/telegram', async (req, res) => {
   try {
-    const user = req.body || {};
-    const valid = verifyTelegramLogin(user, TELEGRAM_BOT_TOKEN);
+    const telegramUser = req.body || {};
+    const valid = verifyTelegramLogin(telegramUser, TELEGRAM_BOT_TOKEN);
 
     if (!valid) {
       return res.status(401).json({ ok: false, error: 'Invalid Telegram auth payload' });
     }
 
-    return res.json({
-      ok: true,
-      user: {
-        id: user.id,
-        first_name: user.first_name,
-        username: user.username,
-        photo_url: user.photo_url || null
-      }
+    const user = await prisma.user.upsert({
+      where: { telegramId: String(telegramUser.id) },
+      update: {
+        username: telegramUser.username || null,
+        firstName: telegramUser.first_name || null,
+        photoUrl: telegramUser.photo_url || null
+      },
+      create: {
+        telegramId: String(telegramUser.id),
+        username: telegramUser.username || null,
+        firstName: telegramUser.first_name || null,
+        photoUrl: telegramUser.photo_url || null
+      },
+      include: { profile: true }
     });
+
+    return res.json({ ok: true, user });
   } catch (error) {
+    console.error(error);
     return res.status(500).json({ ok: false, error: 'Auth verification failed' });
   }
 });
 
-app.post('/api/nutrition/analyze-photo', (_req, res) => {
-  res.json({
-    result: {
+app.get('/api/users/:telegramId', async (req, res) => {
+  const user = await prisma.user.findUnique({
+    where: { telegramId: String(req.params.telegramId) },
+    include: { profile: true, meals: { orderBy: { createdAt: 'desc' }, take: 10 } }
+  });
+
+  if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
+  res.json({ ok: true, user });
+});
+
+app.post('/api/profile', async (req, res) => {
+  try {
+    const { telegramId, age, heightCm, weightKg, goal, activityLevel, equipment, restrictions } = req.body || {};
+    if (!telegramId) return res.status(400).json({ ok: false, error: 'telegramId is required' });
+
+    const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
+
+    const targetCalories = estimateDailyCalories({ age, heightCm, weightKg, goal, activityLevel });
+
+    const profile = await prisma.userProfile.upsert({
+      where: { userId: user.id },
+      update: {
+        age: toIntOrNull(age),
+        heightCm: toIntOrNull(heightCm),
+        weightKg: toFloatOrNull(weightKg),
+        goal: goal || null,
+        activityLevel: activityLevel || null,
+        equipment: Array.isArray(equipment) ? equipment.join(',') : equipment || null,
+        restrictions: Array.isArray(restrictions) ? restrictions.join(',') : restrictions || null,
+        targetCalories
+      },
+      create: {
+        userId: user.id,
+        age: toIntOrNull(age),
+        heightCm: toIntOrNull(heightCm),
+        weightKg: toFloatOrNull(weightKg),
+        goal: goal || null,
+        activityLevel: activityLevel || null,
+        equipment: Array.isArray(equipment) ? equipment.join(',') : equipment || null,
+        restrictions: Array.isArray(restrictions) ? restrictions.join(',') : restrictions || null,
+        targetCalories
+      }
+    });
+
+    res.json({ ok: true, profile });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ ok: false, error: 'Failed to save profile' });
+  }
+});
+
+app.post('/api/nutrition/analyze-photo', async (req, res) => {
+  try {
+    const { telegramId } = req.body || {};
+    const result = {
       title: 'Chicken rice bowl',
       ingredients: ['chicken breast', 'rice', 'vegetables', 'olive oil'],
       estimatedWeightGrams: 420,
@@ -49,17 +112,61 @@ app.post('/api/nutrition/analyze-photo', (_req, res) => {
       fat: 18,
       carbs: 69,
       confidence: 0.76
-    },
-    note: 'Starter mock. Next step: upload image file + vision model + editable portion data.'
-  });
+    };
+
+    let meal = null;
+    if (telegramId) {
+      const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
+      if (user) {
+        meal = await prisma.mealEntry.create({
+          data: {
+            userId: user.id,
+            title: result.title,
+            ingredients: result.ingredients,
+            estimatedWeightGrams: result.estimatedWeightGrams,
+            calories: result.calories,
+            protein: result.protein,
+            fat: result.fat,
+            carbs: result.carbs,
+            confidence: result.confidence
+          }
+        });
+
+        await prisma.leaderboardEntry.create({
+          data: { userId: user.id, points: 5, reason: 'meal_logged', period: 'weekly' }
+        });
+      }
+    }
+
+    res.json({
+      result,
+      meal,
+      note: 'Starter mock. Next step: upload image file + vision model + editable portion data.'
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ ok: false, error: 'Failed to analyze meal' });
+  }
 });
 
-app.post('/api/workouts/generate', (req, res) => {
-  const body = req.body || {};
-  const beginner = !body.activityLevel || body.activityLevel === 'low';
+app.get('/api/nutrition/meals/:telegramId', async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { telegramId: String(req.params.telegramId) } });
+  if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
 
-  res.json({
-    workout: {
+  const meals = await prisma.mealEntry.findMany({
+    where: { userId: user.id },
+    orderBy: { createdAt: 'desc' },
+    take: 30
+  });
+
+  res.json({ ok: true, meals });
+});
+
+app.post('/api/workouts/generate', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const beginner = !body.activityLevel || body.activityLevel === 'low';
+    const workout = {
       title: beginner ? 'Starter full-body workout' : 'Adaptive strength session',
       difficulty: beginner ? 'easy' : 'medium',
       durationMin: beginner ? 20 : 35,
@@ -76,8 +183,42 @@ app.post('/api/workouts/generate', (req, res) => {
             { name: 'Romanian deadlift', sets: 3, reps: '12', restSec: 75 },
             { name: 'Plank shoulder taps', sets: 3, reps: '20 total', restSec: 45 }
           ]
+    };
+
+    let savedWorkout = null;
+    if (body.telegramId) {
+      const user = await prisma.user.findUnique({ where: { telegramId: String(body.telegramId) } });
+      if (user) {
+        savedWorkout = await prisma.workoutSession.create({
+          data: {
+            userId: user.id,
+            title: workout.title,
+            difficulty: workout.difficulty,
+            durationMin: workout.durationMin,
+            payload: workout
+          }
+        });
+      }
     }
+
+    res.json({ workout, savedWorkout });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ ok: false, error: 'Failed to generate workout' });
+  }
+});
+
+app.post('/api/workouts/:id/complete', async (req, res) => {
+  const workout = await prisma.workoutSession.update({
+    where: { id: Number(req.params.id) },
+    data: { completed: true, completedAt: new Date() }
   });
+
+  await prisma.leaderboardEntry.create({
+    data: { userId: workout.userId, points: 10, reason: 'workout_completed', period: 'weekly' }
+  });
+
+  res.json({ ok: true, workout });
 });
 
 app.get('/api/meditations/recommend', (_req, res) => {
@@ -91,14 +232,52 @@ app.get('/api/meditations/recommend', (_req, res) => {
   });
 });
 
-app.get('/api/leaderboard', (_req, res) => {
-  res.json({
-    entries: [
-      { rank: 1, name: 'Alex', points: 420 },
-      { rank: 2, name: 'Mira', points: 390 },
-      { rank: 3, name: 'You', points: 360 }
-    ]
+app.post('/api/meditations/complete', async (req, res) => {
+  try {
+    const { telegramId, title = 'Reset after a stressful day', category = 'stress', durationMin = 7 } = req.body || {};
+    if (!telegramId) return res.status(400).json({ ok: false, error: 'telegramId is required' });
+
+    const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
+
+    const meditation = await prisma.meditationSession.create({
+      data: { userId: user.id, title, category, durationMin, completed: true, completedAt: new Date() }
+    });
+
+    await prisma.leaderboardEntry.create({
+      data: { userId: user.id, points: 5, reason: 'meditation_completed', period: 'weekly' }
+    });
+
+    res.json({ ok: true, meditation });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ ok: false, error: 'Failed to complete meditation' });
+  }
+});
+
+app.get('/api/leaderboard', async (_req, res) => {
+  const rows = await prisma.leaderboardEntry.groupBy({
+    by: ['userId'],
+    where: { period: 'weekly' },
+    _sum: { points: true },
+    orderBy: { _sum: { points: 'desc' } },
+    take: 20
   });
+
+  const users = await prisma.user.findMany({
+    where: { id: { in: rows.map((row) => row.userId) } }
+  });
+
+  const entries = rows.map((row, index) => {
+    const user = users.find((u) => u.id === row.userId);
+    return {
+      rank: index + 1,
+      name: user?.firstName || user?.username || `User ${row.userId}`,
+      points: row._sum.points || 0
+    };
+  });
+
+  res.json({ entries });
 });
 
 app.listen(PORT, () => {
@@ -117,4 +296,26 @@ function verifyTelegramLogin(data, botToken) {
   const secretKey = crypto.createHash('sha256').update(botToken).digest();
   const hmac = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
   return hmac === data.hash;
+}
+
+function estimateDailyCalories(profile) {
+  const weight = Number(profile.weightKg || 70);
+  const height = Number(profile.heightCm || 170);
+  const age = Number(profile.age || 30);
+  const base = 10 * weight + 6.25 * height - 5 * age + 5;
+  const activityMap = { low: 1.2, moderate: 1.45, high: 1.7 };
+  const goalMap = { lose_weight: -350, maintain: 0, gain_muscle: 250, endurance: 150 };
+  const activity = activityMap[profile.activityLevel] || activityMap.moderate;
+  const goal = goalMap[profile.goal] || 0;
+  return Math.max(1200, Math.round(base * activity + goal));
+}
+
+function toIntOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  return Number.parseInt(value, 10);
+}
+
+function toFloatOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  return Number.parseFloat(value);
 }
