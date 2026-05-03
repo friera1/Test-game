@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int      @id @default(autoincrement())
+  telegramId  String   @unique
+  username    String?
+  firstName   String?
+  photoUrl    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  profile     UserProfile?
+  meals       MealEntry[]
+  workouts    WorkoutSession[]
+  meditations MeditationSession[]
+  points      LeaderboardEntry[]
+}
+
+model UserProfile {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @unique
+  age            Int?
+  heightCm       Int?
+  weightKg       Float?
+  goal           String?
+  activityLevel  String?
+  equipment      String?
+  restrictions   String?
+  targetCalories Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MealEntry {
+  id                   Int      @id @default(autoincrement())
+  userId               Int
+  title                String
+  ingredients          Json?
+  estimatedWeightGrams Int?
+  calories             Int
+  protein              Float?
+  fat                  Float?
+  carbs                Float?
+  confidence           Float?
+  photoUrl             String?
+  createdAt            DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model WorkoutSession {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  title       String
+  difficulty  String?
+  durationMin Int?
+  payload     Json?
+  completed   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MeditationSession {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  title       String
+  category    String?
+  durationMin Int?
+  completed   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model LeaderboardEntry {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  points    Int      @default(0)
+  reason    String?
+  period    String   @default("weekly")
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([period])
+  @@index([userId])
+}
