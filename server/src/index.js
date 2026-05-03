@@ -6,6 +6,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { prisma } from './lib/prisma.js';
+import { analyzeFoodPhoto } from './services/foodVision.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,18 +30,13 @@ app.use(cors({ origin: SITE_URL, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(UPLOAD_DIR));
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true });
-});
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.post('/api/auth/telegram', async (req, res) => {
   try {
     const telegramUser = req.body || {};
     const valid = verifyTelegramLogin(telegramUser, TELEGRAM_BOT_TOKEN);
-
-    if (!valid) {
-      return res.status(401).json({ ok: false, error: 'Invalid Telegram auth payload' });
-    }
+    if (!valid) return res.status(401).json({ ok: false, error: 'Invalid Telegram auth payload' });
 
     const user = await prisma.user.upsert({
       where: { telegramId: String(telegramUser.id) },
@@ -70,7 +66,6 @@ app.get('/api/users/:telegramId', async (req, res) => {
     where: { telegramId: String(req.params.telegramId) },
     include: { profile: true, meals: { orderBy: { createdAt: 'desc' }, take: 10 } }
   });
-
   if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
   res.json({ ok: true, user });
 });
@@ -84,7 +79,6 @@ app.post('/api/profile', async (req, res) => {
     if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
 
     const targetCalories = estimateDailyCalories({ age, heightCm, weightKg, goal, activityLevel });
-
     const profile = await prisma.userProfile.upsert({
       where: { userId: user.id },
       update: {
@@ -121,12 +115,7 @@ app.post('/api/nutrition/analyze-photo', async (req, res) => {
   try {
     const { telegramId } = req.body || {};
     const { result, meal } = await analyzeAndSaveMeal({ telegramId });
-
-    res.json({
-      result,
-      meal,
-      note: 'Starter mock. Next step: connect this endpoint to a vision model.'
-    });
+    res.json({ result, meal, note: 'No photo was uploaded, so the mock food analysis was used.' });
   } catch (error) {
     console.error(error);
     res.status(500).json({ ok: false, error: 'Failed to analyze meal' });
@@ -137,11 +126,15 @@ app.post('/api/nutrition/upload-photo', upload.single('photo'), async (req, res)
   try {
     const telegramId = req.body?.telegramId;
     const file = req.file;
-
     if (!file) return res.status(400).json({ ok: false, error: 'photo file is required' });
 
     const publicPhotoUrl = `/uploads/${file.filename}`;
-    const { result, meal } = await analyzeAndSaveMeal({ telegramId, photoUrl: publicPhotoUrl });
+    const { result, meal } = await analyzeAndSaveMeal({
+      telegramId,
+      photoUrl: publicPhotoUrl,
+      filePath: file.path,
+      mimeType: file.mimetype
+    });
 
     res.json({
       ok: true,
@@ -153,7 +146,9 @@ app.post('/api/nutrition/upload-photo', upload.single('photo'), async (req, res)
         size: file.size,
         photoUrl: publicPhotoUrl
       },
-      note: 'Photo upload works. AI vision is still mocked and ready to be replaced.'
+      note: process.env.OPENAI_API_KEY
+        ? 'Photo analyzed through the configured vision pipeline.'
+        : 'Photo uploaded, but OPENAI_API_KEY is missing, so mock analysis was used.'
     });
   } catch (error) {
     console.error(error);
@@ -164,13 +159,7 @@ app.post('/api/nutrition/upload-photo', upload.single('photo'), async (req, res)
 app.get('/api/nutrition/meals/:telegramId', async (req, res) => {
   const user = await prisma.user.findUnique({ where: { telegramId: String(req.params.telegramId) } });
   if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
-
-  const meals = await prisma.mealEntry.findMany({
-    where: { userId: user.id },
-    orderBy: { createdAt: 'desc' },
-    take: 30
-  });
-
+  const meals = await prisma.mealEntry.findMany({ where: { userId: user.id }, orderBy: { createdAt: 'desc' }, take: 30 });
   res.json({ ok: true, meals });
 });
 
@@ -202,13 +191,7 @@ app.post('/api/workouts/generate', async (req, res) => {
       const user = await prisma.user.findUnique({ where: { telegramId: String(body.telegramId) } });
       if (user) {
         savedWorkout = await prisma.workoutSession.create({
-          data: {
-            userId: user.id,
-            title: workout.title,
-            difficulty: workout.difficulty,
-            durationMin: workout.durationMin,
-            payload: workout
-          }
+          data: { userId: user.id, title: workout.title, difficulty: workout.difficulty, durationMin: workout.durationMin, payload: workout }
         });
       }
     }
@@ -225,11 +208,7 @@ app.post('/api/workouts/:id/complete', async (req, res) => {
     where: { id: Number(req.params.id) },
     data: { completed: true, completedAt: new Date() }
   });
-
-  await prisma.leaderboardEntry.create({
-    data: { userId: workout.userId, points: 10, reason: 'workout_completed', period: 'weekly' }
-  });
-
+  await prisma.leaderboardEntry.create({ data: { userId: workout.userId, points: 10, reason: 'workout_completed', period: 'weekly' } });
   res.json({ ok: true, workout });
 });
 
@@ -248,18 +227,13 @@ app.post('/api/meditations/complete', async (req, res) => {
   try {
     const { telegramId, title = 'Reset after a stressful day', category = 'stress', durationMin = 7 } = req.body || {};
     if (!telegramId) return res.status(400).json({ ok: false, error: 'telegramId is required' });
-
     const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
     if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
 
     const meditation = await prisma.meditationSession.create({
       data: { userId: user.id, title, category, durationMin, completed: true, completedAt: new Date() }
     });
-
-    await prisma.leaderboardEntry.create({
-      data: { userId: user.id, points: 5, reason: 'meditation_completed', period: 'weekly' }
-    });
-
+    await prisma.leaderboardEntry.create({ data: { userId: user.id, points: 5, reason: 'meditation_completed', period: 'weekly' } });
     res.json({ ok: true, meditation });
   } catch (error) {
     console.error(error);
@@ -275,31 +249,20 @@ app.get('/api/leaderboard', async (_req, res) => {
     orderBy: { _sum: { points: 'desc' } },
     take: 20
   });
-
-  const users = await prisma.user.findMany({
-    where: { id: { in: rows.map((row) => row.userId) } }
-  });
-
+  const users = await prisma.user.findMany({ where: { id: { in: rows.map((row) => row.userId) } } });
   const entries = rows.map((row, index) => {
     const user = users.find((u) => u.id === row.userId);
-    return {
-      rank: index + 1,
-      name: user?.firstName || user?.username || `User ${row.userId}`,
-      points: row._sum.points || 0
-    };
+    return { rank: index + 1, name: user?.firstName || user?.username || `User ${row.userId}`, points: row._sum.points || 0 };
   });
-
   res.json({ entries });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
 
-async function analyzeAndSaveMeal({ telegramId, photoUrl = null }) {
-  const result = mockFoodVisionAnalysis();
-
+async function analyzeAndSaveMeal({ telegramId, photoUrl = null, filePath = null, mimeType = null }) {
+  const result = await analyzeFoodPhoto({ filePath, mimeType });
   let meal = null;
+
   if (telegramId) {
     const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
     if (user) {
@@ -317,38 +280,20 @@ async function analyzeAndSaveMeal({ telegramId, photoUrl = null }) {
           photoUrl
         }
       });
-
-      await prisma.leaderboardEntry.create({
-        data: { userId: user.id, points: 5, reason: 'meal_logged', period: 'weekly' }
-      });
+      await prisma.leaderboardEntry.create({ data: { userId: user.id, points: 5, reason: 'meal_logged', period: 'weekly' } });
     }
   }
 
   return { result, meal };
 }
 
-function mockFoodVisionAnalysis() {
-  return {
-    title: 'Chicken rice bowl',
-    ingredients: ['chicken breast', 'rice', 'vegetables', 'olive oil'],
-    estimatedWeightGrams: 420,
-    calories: 610,
-    protein: 42,
-    fat: 18,
-    carbs: 69,
-    confidence: 0.76
-  };
-}
-
 function verifyTelegramLogin(data, botToken) {
   if (!botToken || !data || !data.hash) return false;
-
   const checkString = Object.keys(data)
     .filter((key) => key !== 'hash' && data[key] !== undefined && data[key] !== null)
     .sort()
     .map((key) => `${key}=${data[key]}`)
     .join('\n');
-
   const secretKey = crypto.createHash('sha256').update(botToken).digest();
   const hmac = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
   return hmac === data.hash;
