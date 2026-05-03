@@ -163,6 +163,51 @@ app.get('/api/nutrition/meals/:telegramId', async (req, res) => {
   res.json({ ok: true, meals });
 });
 
+app.get('/api/nutrition/summary/:telegramId', async (req, res) => {
+  const user = await prisma.user.findUnique({
+    where: { telegramId: String(req.params.telegramId) },
+    include: { profile: true }
+  });
+  if (!user) return res.status(404).json({ ok: false, error: 'User not found' });
+
+  const date = req.query.date ? new Date(String(req.query.date)) : new Date();
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+
+  const meals = await prisma.mealEntry.findMany({
+    where: { userId: user.id, createdAt: { gte: start, lt: end } },
+    orderBy: { createdAt: 'desc' }
+  });
+
+  const totals = meals.reduce(
+    (acc, meal) => {
+      acc.calories += meal.calories || 0;
+      acc.protein += meal.protein || 0;
+      acc.fat += meal.fat || 0;
+      acc.carbs += meal.carbs || 0;
+      return acc;
+    },
+    { calories: 0, protein: 0, fat: 0, carbs: 0 }
+  );
+
+  const targetCalories = user.profile?.targetCalories || 2050;
+  res.json({
+    ok: true,
+    date: start.toISOString().slice(0, 10),
+    targetCalories,
+    remainingCalories: Math.max(0, targetCalories - totals.calories),
+    totals: {
+      calories: Math.round(totals.calories),
+      protein: Math.round(totals.protein * 10) / 10,
+      fat: Math.round(totals.fat * 10) / 10,
+      carbs: Math.round(totals.carbs * 10) / 10
+    },
+    meals
+  });
+});
+
 app.post('/api/workouts/generate', async (req, res) => {
   try {
     const body = req.body || {};
