@@ -31,6 +31,9 @@ export function App() {
   const [profileForm, setProfileForm] = useState(initialProfile);
   const [savedProfile, setSavedProfile] = useState(null);
   const [meals, setMeals] = useState([]);
+  const [selectedPhoto, setSelectedPhoto] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(null);
+  const [uploadStatus, setUploadStatus] = useState('');
 
   const currentUser = authResult?.user;
   const telegramId = useMemo(() => currentUser?.telegramId || currentUser?.id || '', [currentUser]);
@@ -90,6 +93,46 @@ export function App() {
         if (data.meal) setMeals((prev) => [data.meal, ...prev]);
         refreshLeaderboard();
       });
+  }
+
+  function handlePhotoSelect(event) {
+    const file = event.target.files?.[0];
+    setSelectedPhoto(file || null);
+    setUploadStatus('');
+
+    if (!file) {
+      setPhotoPreview(null);
+      return;
+    }
+
+    setPhotoPreview(URL.createObjectURL(file));
+  }
+
+  async function uploadMealPhoto(event) {
+    event.preventDefault();
+    if (!telegramId) return alert('Login with Telegram first.');
+    if (!selectedPhoto) return alert('Choose a meal photo first.');
+
+    setUploadStatus('Uploading and analyzing...');
+    const formData = new FormData();
+    formData.append('telegramId', telegramId);
+    formData.append('photo', selectedPhoto);
+
+    const response = await fetch(`${API_URL}/api/nutrition/upload-photo`, {
+      method: 'POST',
+      body: formData
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      setUploadStatus(data.error || 'Upload failed');
+      return;
+    }
+
+    setFood(data.result);
+    if (data.meal) setMeals((prev) => [data.meal, ...prev]);
+    setUploadStatus('Photo analyzed and saved.');
+    refreshLeaderboard();
   }
 
   function loadWorkoutDemo() {
@@ -196,8 +239,14 @@ export function App() {
         </Section>
 
         <Section title="Food by photo">
-          <p className="muted">Current version saves demo analysis to DB. Next step: real file upload + AI vision.</p>
-          <button className="secondary" onClick={loadFoodDemo}>Analyze meal demo</button>
+          <p className="muted">Choose a meal photo. Upload is real; AI result is mocked until a vision model is connected.</p>
+          <form className="form" onSubmit={uploadMealPhoto}>
+            <label>Meal photo<input type="file" accept="image/*" onChange={handlePhotoSelect} /></label>
+            {photoPreview && <img className="photo-preview" src={photoPreview} alt="Selected meal" />}
+            <button className="secondary" type="submit">Upload and analyze photo</button>
+          </form>
+          <button className="secondary" onClick={loadFoodDemo}>Analyze meal demo without photo</button>
+          {uploadStatus && <p className="success">{uploadStatus}</p>}
           {food && <pre className="result">{JSON.stringify(food, null, 2)}</pre>}
           <h3>Recent meals</h3>
           <ul className="compact-list">
