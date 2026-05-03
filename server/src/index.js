@@ -2,15 +2,32 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { prisma } from './lib/prisma.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const SITE_URL = process.env.SITE_URL || 'http://localhost:5173';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+
+const upload = multer({
+  dest: UPLOAD_DIR,
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image files are allowed'));
+    cb(null, true);
+  }
+});
 
 app.use(cors({ origin: SITE_URL, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
+app.use('/uploads', express.static(UPLOAD_DIR));
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
@@ -103,49 +120,44 @@ app.post('/api/profile', async (req, res) => {
 app.post('/api/nutrition/analyze-photo', async (req, res) => {
   try {
     const { telegramId } = req.body || {};
-    const result = {
-      title: 'Chicken rice bowl',
-      ingredients: ['chicken breast', 'rice', 'vegetables', 'olive oil'],
-      estimatedWeightGrams: 420,
-      calories: 610,
-      protein: 42,
-      fat: 18,
-      carbs: 69,
-      confidence: 0.76
-    };
-
-    let meal = null;
-    if (telegramId) {
-      const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
-      if (user) {
-        meal = await prisma.mealEntry.create({
-          data: {
-            userId: user.id,
-            title: result.title,
-            ingredients: result.ingredients,
-            estimatedWeightGrams: result.estimatedWeightGrams,
-            calories: result.calories,
-            protein: result.protein,
-            fat: result.fat,
-            carbs: result.carbs,
-            confidence: result.confidence
-          }
-        });
-
-        await prisma.leaderboardEntry.create({
-          data: { userId: user.id, points: 5, reason: 'meal_logged', period: 'weekly' }
-        });
-      }
-    }
+    const { result, meal } = await analyzeAndSaveMeal({ telegramId });
 
     res.json({
       result,
       meal,
-      note: 'Starter mock. Next step: upload image file + vision model + editable portion data.'
+      note: 'Starter mock. Next step: connect this endpoint to a vision model.'
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({ ok: false, error: 'Failed to analyze meal' });
+  }
+});
+
+app.post('/api/nutrition/upload-photo', upload.single('photo'), async (req, res) => {
+  try {
+    const telegramId = req.body?.telegramId;
+    const file = req.file;
+
+    if (!file) return res.status(400).json({ ok: false, error: 'photo file is required' });
+
+    const publicPhotoUrl = `/uploads/${file.filename}`;
+    const { result, meal } = await analyzeAndSaveMeal({ telegramId, photoUrl: publicPhotoUrl });
+
+    res.json({
+      ok: true,
+      result,
+      meal,
+      uploadedFile: {
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        photoUrl: publicPhotoUrl
+      },
+      note: 'Photo upload works. AI vision is still mocked and ready to be replaced.'
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ ok: false, error: 'Failed to upload and analyze meal photo' });
   }
 });
 
@@ -283,6 +295,50 @@ app.get('/api/leaderboard', async (_req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
+async function analyzeAndSaveMeal({ telegramId, photoUrl = null }) {
+  const result = mockFoodVisionAnalysis();
+
+  let meal = null;
+  if (telegramId) {
+    const user = await prisma.user.findUnique({ where: { telegramId: String(telegramId) } });
+    if (user) {
+      meal = await prisma.mealEntry.create({
+        data: {
+          userId: user.id,
+          title: result.title,
+          ingredients: result.ingredients,
+          estimatedWeightGrams: result.estimatedWeightGrams,
+          calories: result.calories,
+          protein: result.protein,
+          fat: result.fat,
+          carbs: result.carbs,
+          confidence: result.confidence,
+          photoUrl
+        }
+      });
+
+      await prisma.leaderboardEntry.create({
+        data: { userId: user.id, points: 5, reason: 'meal_logged', period: 'weekly' }
+      });
+    }
+  }
+
+  return { result, meal };
+}
+
+function mockFoodVisionAnalysis() {
+  return {
+    title: 'Chicken rice bowl',
+    ingredients: ['chicken breast', 'rice', 'vegetables', 'olive oil'],
+    estimatedWeightGrams: 420,
+    calories: 610,
+    protein: 42,
+    fat: 18,
+    carbs: 69,
+    confidence: 0.76
+  };
+}
 
 function verifyTelegramLogin(data, botToken) {
   if (!botToken || !data || !data.hash) return false;
